@@ -1,0 +1,398 @@
+---
+title: "Predicting Smokers"
+author: "Andrew Ross"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(randomForest)
+library(xgboost)
+library(earth)
+library(MLmetrics)
+```
+
+# Introduction
+
+"Do you smoke?" is a common question everyone gets asked when they have a doctor's
+appointment. Some lie while others tell the truth. If the patient lies, it d\
+oesn't help 
+them obtain quality care.  If someone lies about smoking, it can lead to other 
+altercations for their health.  It would be nice to have a quantitative scientific answer rather 
+than listening or seeing into someones lungs. Here we present two models 
+(random forest and boosting) 
+to help predict someone smokes based on many typical vitals taken at the doctors.
+We used other models that will not be shown in detail, but we will show how they
+performed.
+
+# Data
+
+## Feature Engineering and EDA
+
+Below is a glimpse of the data, so we can understand the information.
+
+```{r, include = F}
+
+data = read.csv("D:\\Data Analysis 3\\Project\\train.csv")
+```
+
+```{r, echo=FALSE}
+
+knitr::kable(DataExplorer::profile_missing(data)[1:2])
+
+```
+
+We can see we have 24 features and a sample size of 159256 patients.  
+The entire data set is complete.
+
+Each variable in the data set is quantitative or factors such as whether
+or not someone smokes (1 = yes, 0 = no).  We notice the data has multiple vitals
+as well as if someone can see or hear.  There's quite a bit of information related to blood.
+
+We can see the relationship between all variables in the plot below:
+
+```{r, echo=FALSE,fig.height=10, fig.width=10, message=FALSE, warning=FALSE}
+
+GGally::ggcorr(data,  geom = 'text', label_size = 5, hjust = 0.75, size = 3)
+
+```
+
+Smoking is not highly correlated with any feature.  For those that have high correlation, weight and height, systolic and relaxation, cholesterol and LDL are correlated pairs. 
+
+We use the relationship of weight and height to create a new variable called body mass index (BMI).  BMI screens for weight categories that may lead to health problems.
+The formula for BMI is as follows:
+
+$$
+BMI = weight_{kg}/(height_m^2)
+$$
+
+We were given height in centimeters which was properly converted to meters.
+
+```{r, include=FALSE}
+data = data |> mutate(BMI = weight.kg./(height.cm./100)^2)
+
+data = data |> mutate(ASTALTRatio = AST/ALT)
+
+data = data |> mutate_if(is.character, as.factor)
+
+data = data |> mutate(across(c(smoking, dental.caries), factor))
+
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+#cor(data|> select(is.numeric))
+
+data = data |> mutate(type_systolic = case_when(systolic <=90 ~ 'low', 
+                                                systolic > 90 & systolic <120 ~ 'normal',
+                                                systolic >= 120 & systolic <130 ~ 'elevated',
+                                                systolic >= 130 ~ 'high'))
+
+data = data |> mutate(type_of_fasting = case_when(fasting.blood.sugar < 70 ~ 'low',
+                                                      fasting.blood.sugar >= 70 & fasting.blood.sugar< 100 ~ 'normal',
+                                                      fasting.blood.sugar >= 100 & fasting.blood.sugar < 126 ~ 'need_monitoring', 
+                                                      fasting.blood.sugar >=126 ~ 'diabetes_diagnosed'))
+
+data = data |> mutate(type_of_hemoglobin = case_when(hemoglobin < 14 ~ 'anemic',
+                                                 hemoglobin >=14 & hemoglobin < 19 ~ 'normal',
+                                                 hemoglobin >=19 ~ 'erythrocytosis'))
+
+data = data |> mutate(type_of_serum.creatinine = case_when(serum.creatinine <0.7~'low',
+                                                               serum.creatinine >= 0.7 & serum.creatinine < 1.3 ~ 'normal',
+                                                               serum.creatinine >= 1.30 ~ 'high'))
+
+data = data |> mutate(type_of_cholesterol = case_when(Cholesterol < 200~ 'normal',
+                                                      Cholesterol >= 200 & Cholesterol < 240~'borderline_high',
+                                                      Cholesterol >= 240 ~ 'high'))
+
+data = data |> mutate(type_of_ldl = case_when(LDL < 131 ~ 'optimal', LDL >= 100 & LDL <130 ~ 'near_optimal',
+                                              LDL >= 130 & LDL < 160 ~ 'borderline_high',
+                                              LDL >= 160  ~ 'High'))
+
+data = data |> mutate(type_of_hdl = case_when(HDL <= 34 ~ 'low', HDL >= 35 & HDL <66 ~'normal', 
+                                                  HDL >=66~'high'))
+
+data = data |> mutate(age_bin = case_when(age < 35~'young', age >= 35 & age < 55 ~ 'middle', 
+                                            age >= 55 ~ 'old'))
+
+
+
+data = data |> mutate(BMI_class = case_when(BMI <= 18.4~'underweight',
+                                                BMI >= 18.5 & BMI < 25 ~'normal',
+                                                BMI >= 25 & BMI < 40 ~ 'overweight',
+                                                BMI >= 40 ~ 'obese'))
+#table(data$BMI_class)
+
+data = data |> mutate(try_class = case_when(triglyceride < 150 ~ 'normal', 
+                                            triglyceride >= 150 & triglyceride < 200~'borderline_high',
+                                            triglyceride >=200 ~ 'high'))
+
+
+
+```
+
+
+Here we present two graphs: We create a histogram of body mass index (BMI)
+and the other being smoking (our predictor).  
+
+The reason for constructing this variable is based off of the correlation between height, weight, and waist. Below is a correlation matrix for BMI, weight, height, and waist. 
+
+```{r, echo=FALSE}
+
+knitr::kable(data |> select(BMI, height.cm., weight.kg., waist.cm.)|>cor())
+
+```
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+data |> ggplot(mapping = aes(x = BMI)) + geom_histogram()  + labs(title = 'Frequency of BMI')
+```
+
+BMI is a function of height and weight as it will be correlated with them. 
+We can see BMI is correlated with waist as well.  
+The rest of the variables are correlated with each other.
+
+The graph below shows the proportion of smokers vs nonsmokers. The data is almost
+split evenly.  
+
+```{r, echo=FALSE}
+data |> ggplot(mapping = aes(x = smoking)) + geom_bar() +
+  labs(title = 'Do you Smoke?', y = 'Number of People') + 
+  scale_x_discrete(labels = c('No', 'Yes')) + 
+  annotate('text', label = '43.74%', x = 2, y = 75000) +
+  annotate('text', label = '56.26%', x = 1, y = 95000)
+```
+
+
+# Model Building 
+
+We use a 70-30 training and test split because the
+goal will be to get the highest area under the ROC curve, and Kaggle does not provide a 'smoking' column in the test set 
+for us to use the AUC function. The models we considered
+were logistic regression, Random forest, XGTree boost, MARS, Linear and quadratic
+discriminant analysis, and K-Nearest Neighbors.  We will speak in more detail about 
+XBTree boost and Random forest, since these two models performed the best while 
+the results from the others will only show the AUC metric.  
+
+## Train-test split
+
+```{r}
+set.seed(123)
+
+trainIndex <- createDataPartition(data$smoking, p = .7, 
+                                  list = FALSE, 
+                                  times = 1)
+
+train = data[trainIndex,]
+test = data[-trainIndex,]
+
+
+```
+
+
+## For kaggle comp
+
+
+```{r, include=FALSE}
+
+train2 = data
+
+test2 = read.csv("D:\\Data Analysis 3\\Project\\test.csv")
+
+test2 = test2 |> mutate(BMI = weight.kg./(height.cm./100)^2)
+
+test2 = test2 |> mutate(ASTALTRatio = AST/ALT)
+
+test2 = test2 |> mutate_if(is.character, as.factor)
+
+test2$dental.caries = as.factor(test2$dental.caries)
+
+
+```
+
+
+
+## Part 1: raw train
+
+### logistic model
+
+
+```{r, include=FALSE, eval=FALSE}
+# creating models from the raw train to classify smoking
+
+model.log1 = glm(smoking~., family = binomial, data |> select(1, 5, 9:23, 32))
+summary(model.log1)
+
+model.logpred1 = predict(model.log1, newdata = test |> select(1, 5, 9:23, 32))
+Metrics::auc(test$smoking, model.logpred1)
+
+```
+
+First, let us look at random forest.  Using 10 fold cross validation, we find the models performs the best on
+the test data set when there are 11 variables considered at each split. We show the variable importance below:
+
+### Random Forest
+
+```{r, include=FALSE, eval=FALSE}
+set.seed(4)
+# This takes awhile
+
+rf.mod = train(smoking~., data = train |> select(1, 5:23, 32), 
+                method = 'rf',
+                trControl = trainControl('cv', number = 10))
+
+rf.mod$bestTune
+
+rf.modpred = predict(rf.mod, newdata = test|> select(1, 5:23, 32), type = 'prob')
+
+Metrics::auc(test$smoking, rf.modpred$`1`)
+
+plot(varImp(rf.mod))
+```
+
+```{r, echo=FALSE}
+knitr::include_graphics("D:\\Data Analysis 3\\Project\\Random_Forest_FI.PNG")
+```
+
+
+One could remove dental.varies, urine protein, and below as they won't change much of the prediction accuracy
+for the testing set.  The final accuracy for the model is 84.81% for area under the ROC curve.
+
+### Boosting
+
+Now we check the boosting model.  For this model, we did remove eyesight, hearing, and urine protein.  They were
+not important just like in random forest.  We use 10 fold cross validation to find the optimal number for
+eta to be 0.4, which represents a weight for tree values. The number of rounds is
+150 and max depth is 3.  Below is a plot of the variable importance:
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+set.seed(4)
+
+boost.m = train(smoking~., data = train2|>select(2, 10:17,19, 22:26), 
+                method = 'xgbTree',
+                trControl = trainControl('cv', number = 10, savePredictions = T))
+
+boost.m$bestTune
+
+boost.mpred = predict(boost.m, newdata = test2, type = 'prob')
+
+Metrics::auc(test$smoking, boost.mpred$`1`)
+
+plot(varImp(boost.m))
+
+write.csv(cbind(test2$id,boost.mpred$`1`), file = "D:\\Data Analysis 3\\Project\\predictions.csv")
+```
+
+```{r, echo=FALSE}
+knitr::include_graphics("D:\\Data Analysis 3\\Project\\Boosting_Fi.PNG")
+```
+
+
+Any value below BMI may not be important for this model to predict smoking.  The final accuracy for this model
+is 85.99% area under the ROC curve.
+
+To compare the two models, we notice hemoglobin is the greatest predictor and every variable after does not
+live up to hemoglobin's potential.  After creating BMI as a variable, it is nice to see that it is a top predictor for these models.  
+
+### MARS
+
+```{r, include=FALSE, eval=FALSE}
+
+set.seed(4)
+ctrl <- caret::trainControl(method = "cv", number = 10)
+
+mars_modelcv <- train(smoking ~.,
+                      data = train |> select(1, 5:23, 32),
+                      method = "earth", 
+                      trControl = ctrl
+)
+
+print(mars_modelcv)
+plot(mars_modelcv)
+varImp(mars_modelcv)
+
+mars.mpred = predict(mars_modelcv, newdata = test |> select(1, 5:23, 32), type = 'prob')
+
+Metrics::auc(test$smoking, mars.mpred$`1`)
+```
+
+
+### LDA and QDA
+
+```{r, include=FALSE, eval=FALSE}
+
+lda.m = MASS::lda(smoking~., data =train |> select(1, 9:23,32))
+
+lda.m
+
+lda.mpred = predict(lda.m, newdata = test|>select(1, 9:23,32))
+
+Metrics::auc(test$smoking, lda.mpred$posterior[,2])
+
+```
+
+```{r, include=FALSE, eval=FALSE}
+qda.m = MASS::qda(smoking~., data =train|>select(1, 9:23,32))
+
+qda.mpred = predict(qda.m, newdata = test|>select(1, 9:23,32))
+
+Metrics::auc(test$smoking, qda.mpred$posterior[,2])
+```
+
+### KNN
+
+```{r, include=FALSE, eval=FALSE}
+
+knn.m = train(smoking~., data = train |> select(1:23,32), method = 'knn', 
+              trControl = trainControl(method = 'cv'))
+
+knn.mpred = predict(knn.m, newdata = test|>select(1:23,32), type = 'prob')
+
+Metrics::auc(test$smoking, knn.mpred$`1`)
+
+
+```
+
+
+```{r, include=FALSE}
+auc_table = data.frame(Model = c('KNN', 'LDA', 'QDA', "Logistic", 'Random Forest', 'Boosting', 'MARS'),
+                       AUC = c(80.33, 82.04, 79.74, 82.36, 84.81, 85.99, 83.68))
+```
+
+# Conclusion
+
+Below is a table showing the AUC
+for each model:
+
+```{r, echo=FALSE}
+knitr::kable(auc_table)
+```
+
+As stated previously, boosting and random forest had the highest AUC percentage.
+The other models were not far away from these two and can still be reliable options.
+
+The last thing I want to bring to attention is that we performed other feature 
+engineering that wasn't successful and will be left out for this report. One example we tried is
+for each variable that is related to blood (systolic, HDL, LDL, etc). We can 
+bin those variables into classes. For example, high, normal, or low blood pressure.  
+The models performed worse with those classes than the quantitative values.  
+We could speak to subject matter experts to find a better way to group variables, or we could use a categorical  boosting model. Furthermore, blood results differ between men and female, so it would be interesting to see which patients are at-birth male and female in future analysis. 
+There are other variable related measurements such as AST/ALT.
+
+```{r, include=FALSE, fig.height=10, fig.width=10}
+DataExplorer::plot_histogram(data)
+```
+
+
+Finally, a screenshot of my kaggle score:
+
+```{r, echo=FALSE}
+knitr::include_graphics("D:\\Data Analysis 3\\Project\\Kaggle_score.PNG")
+```
+
